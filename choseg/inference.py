@@ -55,16 +55,18 @@ def get_img_list_dataloader(img_list, batch_size=16, num_workers=0, pin_memory=F
 # --- Patch function to add dummy attribute to DepthwiseSeparableConv ---
 def patch_depthwise_separable_conv(model):
     """
-    Iterate over model's modules. If a module's type name contains 'DepthwiseSeparableConv'
-    and it doesn't have the attribute 'conv_s2d', then assign a dummy attribute.
+    Iterate over all submodules of the model and if a module's type name
+    (case-insensitive) contains 'depthwiseseparableconv' and it does not have 
+    the attribute 'conv_s2d', then add it (using its 'depthwise' attribute if available).
     """
     for module in model.modules():
-        if "DepthwiseSeparableConv" in type(module).__name__ and not hasattr(module, 'conv_s2d'):
-            # If the module has a 'depthwise' attribute, use it.
+        module_name = type(module).__name__
+        if "depthwiseseparableconv" in module_name.lower() and not hasattr(module, 'conv_s2d'):
+            print(f"Patching module: {module_name}")
             if hasattr(module, 'depthwise'):
                 module.conv_s2d = module.depthwise
             else:
-                module.conv_s2d = torch.nn.Identity()
+                module.conv_s2d = nn.Identity()
     return model
 
 # --- DeepGPET Class with modification ---
