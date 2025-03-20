@@ -9,26 +9,22 @@ from tqdm.autonotebook import tqdm
 from pathlib import Path, PurePath
 import sys
 
-
+# --- Helper Transform and Dataset Classes (unchanged) ---
 class FixShape(TT.Transform):
     def __init__(self):
-        """Forces input to have dimensions divisble by 32"""
+        """Forces input to have dimensions divisible by 32"""
         super().__init__()
-
     def __call__(self, img):
         M, N = img.shape[-2:]
-        pad_M = (32 - M%32) % 32
-        pad_N = (32 - N%32) % 32
+        pad_M = (32 - M % 32) % 32
+        pad_N = (32 - N % 32) % 32
         return TF.pad(img, padding=(0, 0, pad_N, pad_M)), (M, N)
-
     def __repr__(self):
         return self.__class__.__name__
-
 
 def get_default_img_transform():
     """Tensor, dimension and normalisation default augs"""
     return T.Compose([T.ToTensor(), T.Normalize((0.1,), (0.2,)), FixShape()])
-    
 
 class ImgListDataset(Dataset):
     """Torch Dataset from img list"""
@@ -39,18 +35,15 @@ class ImgListDataset(Dataset):
         elif isinstance(img_list[0], np.ndarray):
             self.is_arr = True
         self.transform = get_default_img_transform()
-
     def __len__(self):
         return len(self.img_list)
-
     def __getitem__(self, idx):
         if self.is_arr:
-            img = (255*self.img_list[idx]/self.img_list[idx].max()).astype(np.uint8)
+            img = (255 * self.img_list[idx] / self.img_list[idx].max()).astype(np.uint8)
         else:
             img = Image.open(self.img_list[idx])
         img, shape = self.transform(img)
-        return {'img': img, "crop":shape}
-
+        return {'img': img, "crop": shape}
 
 def get_img_list_dataloader(img_list, batch_size=16, num_workers=0, pin_memory=False):
     """Wrapper of Dataset into DataLoader"""
@@ -59,38 +52,50 @@ def get_img_list_dataloader(img_list, batch_size=16, num_workers=0, pin_memory=F
                         pin_memory=pin_memory)
     return loader
 
+# --- Patch function to add dummy attribute to DepthwiseSeparableConv ---
+def patch_depthwise_separable_conv(model):
+    """
+    Iterate over model's modules. If a module's type name contains 'DepthwiseSeparableConv'
+    and it doesn't have the attribute 'conv_s2d', then assign a dummy attribute.
+    """
+    for module in model.modules():
+        if "DepthwiseSeparableConv" in type(module).__name__ and not hasattr(module, 'conv_s2d'):
+            # If the module has a 'depthwise' attribute, use it.
+            if hasattr(module, 'depthwise'):
+                module.conv_s2d = module.depthwise
+            else:
+                module.conv_s2d = torch.nn.Identity()
+    return model
 
+# --- DeepGPET Class with modification ---
 class DeepGPET:
     DEFAULT_MODEL_URL = 'https://github.com/jaburke166/deepgpet/releases/download/v1/deepgpet_weights.pth'
     DEFAULT_THRESHOLD = 0.5
     
     def __init__(self, model_path=DEFAULT_MODEL_URL, threshold=DEFAULT_THRESHOLD, local_model_path=None):
         """Core inference class for DeepGPET"""
-        
         self.transform = get_default_img_transform()
         self.threshold = threshold
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.device = "mps" if torch.backends.mps.is_available() else "cpu"
+        # If using MPS, uncomment the following line:
+        # self.device = "mps" if torch.backends.mps.is_available() else "cpu"
         if local_model_path is not None:
             self.model = torch.load(local_model_path, map_location=self.device)
         else:
             self.model = torch.hub.load_state_dict_from_url(model_path, map_location=self.device)
+        # Patch model to add dummy attribute for DepthwiseSeparableConv layers
+        self.model = patch_depthwise_separable_conv(self.model)
         if self.device != "cpu":
             print("DeepGPET has been loaded with GPU acceleration!")
         self.model.eval()
     
-
     @torch.inference_mode()
     def predict_img(self, img, soft_pred=False):
         """Inference on a single image"""
         if isinstance(img, (str, PurePath)):
-            # assume it's a path to an image
             img = Image.open(img)
         elif isinstance(img, np.ndarray):
-            # assume it's a numpy array
-            # NOTE: we assume that the image has not been normalized yet
             img = Image.fromarray(img)
-
         with torch.no_grad():
             img, (M, N) = self.transform(img)
             img = img.unsqueeze(0).to(self.device)
@@ -98,7 +103,7 @@ class DeepGPET:
             if not soft_pred:
                 pred = (pred > self.threshold).int()
             return pred.cpu().numpy()[0, :M, :N]
-
+    
     def predict_list(self, img_list, soft_pred=False):
         """Inference on a list of images without batching"""
         preds = []
@@ -107,7 +112,7 @@ class DeepGPET:
                 pred = self.predict_img(img, soft_pred=soft_pred)
                 preds.append(pred)
         return preds
-
+    
     def _predict_loader(self, loader, soft_pred=False):
         """Inference from a DataLoader"""
         preds = []
@@ -118,20 +123,22 @@ class DeepGPET:
                 pred = self.model(img).sigmoid().squeeze().cpu().numpy()
                 if not soft_pred:
                     pred = (pred > self.threshold).astype(np.int64)
-                pred = [p[:M,:N] for (p, M, N) in zip(pred, batch_M, batch_N)]
+                pred = [p[:M, :N] for (p, M, N) in zip(pred, batch_M, batch_N)]
                 preds.append(pred)
         return preds
-
+    
     def batch_predict(self, img_list, soft_pred=False, batch_size=16, num_workers=0, pin_memory=False):
         """Wrapper for DataLoader inference"""
         loader = get_img_list_dataloader(img_list, batch_size=batch_size, num_workers=num_workers,
                                          pin_memory=pin_memory)
         preds = self._predict_loader(loader, soft_pred=soft_pred)
         return preds
-
+    
     def __call__(self, x):
-        """Direct call for inference on single  image"""
+        """Direct call for inference on single image"""
         return self.predict_img(x)
-
+    
     def __repr__(self):
         return f'{self.__class__.__name__}(threshold={self.threshold})'
+
+# --- End of modified DeepGPET code ---
