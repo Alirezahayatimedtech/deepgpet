@@ -55,18 +55,24 @@ def get_img_list_dataloader(img_list, batch_size=16, num_workers=0, pin_memory=F
 # --- Patch function to add dummy attribute to DepthwiseSeparableConv ---
 def patch_depthwise_separable_conv(model):
     """
-    Iterate over all submodules of the model and if a module's type name
-    (case-insensitive) contains 'depthwiseseparableconv' and it does not have 
-    the attribute 'conv_s2d', then add it (using its 'depthwise' attribute if available).
+    Iterate over model's modules and patch any custom DepthwiseSeparableConv layers.
+    If a module's type name contains "depthwiseseparableconv" (case-insensitive) and it doesn't have
+    the attributes 'conv_s2d' or 'bn_s2d', then add them.
     """
     for module in model.modules():
-        module_name = type(module).__name__
-        if "depthwiseseparableconv" in module_name.lower() and not hasattr(module, 'conv_s2d'):
-            print(f"Patching module: {module_name}")
-            if hasattr(module, 'depthwise'):
-                module.conv_s2d = module.depthwise
-            else:
-                module.conv_s2d = nn.Identity()
+        module_name = type(module).__name__.lower()
+        if "depthwiseseparableconv" in module_name:
+            if not hasattr(module, 'conv_s2d'):
+                if hasattr(module, 'depthwise'):
+                    module.conv_s2d = module.depthwise
+                else:
+                    module.conv_s2d = torch.nn.Identity()
+            if not hasattr(module, 'bn_s2d'):
+                # If your module has a batch norm layer (commonly named 'bn' or similar), use it.
+                if hasattr(module, 'bn'):
+                    module.bn_s2d = module.bn
+                else:
+                    module.bn_s2d = torch.nn.Identity()
     return model
 
 # --- DeepGPET Class with modification ---
